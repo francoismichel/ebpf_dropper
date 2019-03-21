@@ -108,7 +108,7 @@ __attribute__((always_inline)) uint32_t get_random_smaller_than(uint32_t *state,
     int i;
     for (i = 0 ; i < 5 ; i++) {
         r = get_random_u32(state);
-        if (r >= (0x7fffffff - 0x7fffffff % max))
+        if (r < (0x7fffffff - 0x7fffffff % max))
             break;
     }
 
