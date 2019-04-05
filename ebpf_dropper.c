@@ -17,6 +17,40 @@
 #define IP_TCP 	6
 #define ETH_HLEN 14
 
+struct tcphdr {
+	__be16	source;
+	__be16	dest;
+	__be32	seq;
+	__be32	ack_seq;
+#if defined(__LITTLE_ENDIAN_BITFIELD)
+	__u16	res1:4,
+		doff:4,
+		fin:1,
+		syn:1,
+		rst:1,
+		psh:1,
+		ack:1,
+		urg:1,
+		ece:1,
+		cwr:1;
+#elif defined(__BIG_ENDIAN_BITFIELD)
+	__u16	doff:4,
+		res1:4,
+		cwr:1,
+		ece:1,
+		urg:1,
+		ack:1,
+		psh:1,
+		rst:1,
+		syn:1,
+		fin:1;
+#else
+#error	"Adjust your <asm/byteorder.h> defines"
+#endif	
+	__be16	window;
+	__sum16	check;
+	__be16	urg_ptr;
+};
 
 
 #define SEC(NAME) __attribute__((section(NAME), used))
@@ -45,7 +79,7 @@ struct bpf_elf_map SEC("maps") map = {
         .size_key = sizeof(int),
         .size_value = sizeof(__u32),
         .pinning = PIN_NONE,
-        .max_elem = 2,
+        .max_elem = 3,
 };
 
 typedef enum state {
@@ -78,6 +112,7 @@ typedef enum state {
 #define ALL_DROP(...) all_drop_f((int[]){__VA_ARGS__}, NUMARGS(__VA_ARGS__))
 
 #define UDP 0x11
+#define TCP 0x06
 
 #define PROBA_PRECISION 5 // number of digits in the decimal part
 
@@ -175,6 +210,43 @@ __attribute__((always_inline)) gemodel_state next_state(gemodel_state state, uin
     }
     return drop_if_random_with_proba(r_times_100) == DROP ? GOOD : BAD;
 }
+
+
+// returns DROP with a probabylity of proba
+// retuens PASS otherwise
+__attribute__((always_inline)) int drop_packet_sequence(__u32 sequence[], uint8_t len)
+{
+    int key = 0;
+    __u32 *state = bpf_map_lookup_elem(&map, &key);
+    if(!state || *state == 0) {
+        __u32 s = 1; // we init it to 1 because 0 means no value)
+        bpf_map_update_elem(&map, &key, &s, BPF_ANY);
+        bpf_debug("init state to 1\n");
+    }
+
+    state = bpf_map_lookup_elem(&map, &key);
+    if (state) {
+        int maybe_drop = PASS;
+        __u32 dropped = 0xFFFF;
+        for (int i = 0 ; i < len && i <= 0xFF ; i++) {
+            if (sequence[i] == *state-1) {  // state-1 here because our state starts at 1 (because 0 means no value)
+                maybe_drop = DROP;
+                dropped = sequence[i];
+                break;
+            }
+        }
+        
+        *state = *state + 1;
+        bpf_map_update_elem(&map, &key, state, BPF_ANY);
+        if (maybe_drop == DROP) {
+            bpf_debug("DROP PACKET %u\n", dropped);
+            return DROP;
+        }
+        return PASS;
+    }
+    return PASS;
+}
+
 
 // returns DROP with a probabylity of proba
 // retuens PASS otherwise
@@ -275,6 +347,24 @@ __attribute__((always_inline)) __u16 get_udp_sport(struct __sk_buff *skb) {
     return (b1 + b2);
 }
 
+// returns the dest port as a 16 bits unsigned integer
+__attribute__((always_inline)) __u16 get_tcp_dport(struct __sk_buff *skb) {
+    ////// LOAD DEST PORT BYTE PER BYTE
+    __u16 b1 = ((__u32) load_byte(skb, ETH_HLEN + sizeof(struct iphdr) + offsetof(struct tcphdr, dest)) << 8);
+    __u16 b2 = ((__u32) load_byte(skb, ETH_HLEN + sizeof(struct iphdr) + offsetof(struct tcphdr, dest) + 1));
+    ////// END LOAD DEST PORT BYTE PER BYTE
+    return (b1 + b2);
+}
+
+// returns the dest port as a 16 bits unsigned integer
+__attribute__((always_inline)) __u16 get_tcp_sport(struct __sk_buff *skb) {
+    ////// LOAD SOURCE PORT BYTE PER BYTE
+    __u16 b1 = ((__u32) load_byte(skb, ETH_HLEN + sizeof(struct iphdr) + offsetof(struct tcphdr, source)) << 8);
+    __u16 b2 = ((__u32) load_byte(skb, ETH_HLEN + sizeof(struct iphdr) + offsetof(struct tcphdr, source) + 1));
+    ////// END LOAD SOURCE PORT BYTE PER BYTE
+    return (b1 + b2);
+}
+
 __attribute__((always_inline)) int drop_if_src_dst_addr(struct __sk_buff *skb, __u32 src, __u32 dst) {
     return (src == get_saddr(skb) && dst == get_daddr(skb)) ? DROP : PASS;
 }
@@ -293,10 +383,17 @@ __attribute__((always_inline)) int drop_if_udp_port(struct __sk_buff *skb, __u16
     __u16 sport = get_udp_sport(skb);
     __u16 dport = get_udp_dport(skb);
 
-    int key = 0;
+    int key = 2;
     __u32 *state = bpf_map_lookup_elem(&map, &key);
     if(sport == 6121 && state && *state != 0)
         bpf_debug("sport = %u, state = %u, seed = %u\n", sport, *state, SEED);
+    return (port == sport || port == dport) ? DROP : PASS;
+}
+
+__attribute__((always_inline)) int drop_if_tcp_port(struct __sk_buff *skb, __u16 port) {
+    __u16 sport = get_tcp_sport(skb);
+    __u16 dport = get_tcp_dport(skb);
+
     return (port == sport || port == dport) ? DROP : PASS;
 }
 
@@ -318,6 +415,18 @@ __attribute__((always_inline)) int decision_function(struct __sk_buff *skb) {
     return PASS;
 }
 
+// use to drop a defined TCP packet sequence
+
+// this functions drops the packets 0, 3, 4, 8 and 10 from the TCP flow between IP1_TO_DROP and IP2_TO_DROP, on port PORT_TO_WATCH
+__attribute__((always_inline)) int decision_function_drop_tcp_sequence(struct __sk_buff *skb) {
+    // to be completed by the user
+    if (ALL_DROP(drop_if_tcp_port(skb, PORT_TO_WATCH), drop_if_protocol(skb, TCP), drop_if_addrs(skb, IP1_TO_DROP, IP2_TO_DROP))){
+        __u32 sequence[5] = {0, 3, 8, 10, 4};
+        return drop_packet_sequence(sequence, 5);
+    }
+    return PASS;
+}
+
 // modified by the user to wrap the decision function with other functions
 // returns DROP when a packet must be dropped
 // returns PASS otherwise
@@ -325,6 +434,7 @@ SEC("action") int handle_ingress(struct __sk_buff *skb)
 {
     // to be completed by the user
     return decision_function(skb);
+    //return decision_function_drop_tcp_sequence(skb);
 }
 
 char _license[] SEC("license") = "GPL";
