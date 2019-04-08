@@ -12,7 +12,7 @@ def ip_to_int(ip):
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--sequence", help="drop a sequence of packets (numbers separated by commas)", default="{}")
+parser.add_argument("--sequence", help="drop a sequence of packets (numbers separated by commas)", default="")
 parser.add_argument("--gemodel", help="use a gilbert-elliott model", action="store_true")
 parser.add_argument("-P", help="loss rate or p gemodel parameter (float) (0 <= p <= 100)", type=float, default=0)
 parser.add_argument("-R", help="r gemodel parameter (float) (0 <= r <= 100)", type=float, default=100)
