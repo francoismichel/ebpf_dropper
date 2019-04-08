@@ -19,6 +19,7 @@ parser.add_argument("-R", help="r gemodel parameter (float) (0 <= r <= 100)", ty
 parser.add_argument("-K", help="k gemodel parameter (float) (0 <= k <= 100)", type=float, default=100)
 parser.add_argument("-H", help="h gemodel parameter (float) (0 <= h <= 100)", type=float, default=0)
 parser.add_argument("-f", help="filename to write the compiled eBPF bytecode into (default ebpf_dropper.o)", default="ebpf_dropper.o")
+parser.add_argument("-v", help="verbose mode", action="store_true")
 parser.add_argument("--ips", help="pair of IPv4 addresses to watch (separated by a comma), a packet must have both of "
                                 "these addresses in either source or destination in order to be considered by the "
                                 "dropper")
@@ -55,23 +56,25 @@ clang_args = "-DGEMODEL={} -DGEMODEL_P_PERCENTS={} -DGEMODEL_R_PERCENTS={} -DGEM
     .format(use_gemodel, args.P, args.R, args.K, args.H, args.P, drop_sequence, sequence, args.seed, ip_to_int(ips[0]), ip_to_int(ips[1]),
             args.port, protocol, args.headers)
 
-print(clang_args)
 
 import os
 
 compile_cmd = "clang -O2 {} -D__KERNEL__ -D__ASM_SYSREG_H -Wno-unused-value -Wno-pointer-sign " \
               "-Wno-compare-distinct-pointer-types -I./headers -emit-llvm -c ebpf_dropper.c -o - | llc -march=bpf " \
               "-filetype=obj -o {}".format(clang_args, args.f)
-print(compile_cmd)
+if args.v:
+    print(compile_cmd)
 os.system(compile_cmd)
 
 
 if args.attach:
     add_dev_cmd = "tc qdisc replace dev {} clsact".format(args.attach)
-    print(add_dev_cmd)
+    if args.v:
+        print(add_dev_cmd)
     os.system(add_dev_cmd)
     direction = "ingress" if args.attach_ingress else 'egress'
     attach_cmd = "tc filter replace dev {} {} bpf obj {} section action direct-action"\
         .format(args.attach, direction, args.f)
-    print(attach_cmd)
+    if args.v:
+        print(attach_cmd)
     os.system(attach_cmd)
