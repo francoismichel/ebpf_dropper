@@ -63,7 +63,9 @@ import os
 if args.clean:
     if os.path.exists(args.f):
         os.remove(args.f)
-        add_dev_cmd = "tc qdisc del dev {} clsact".format(args.attach)
+    del_dev_cmd = "tc qdisc del dev {} clsact".format(args.attach)
+    print(del_dev_cmd)
+    os.system(del_dev_cmd)
 
 else:
     compile_cmd = "clang -O2 {} -D__KERNEL__ -D__ASM_SYSREG_H -Wno-unused-value -Wno-pointer-sign " \
