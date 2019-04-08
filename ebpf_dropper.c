@@ -5,18 +5,59 @@
  */
 
 #define KBUILD_MODNAME "EBPF Dropper"
-#include <uapi/linux/if_ether.h>
-#include <uapi/linux/if_packet.h>
-#include <uapi/linux/ip.h>
-#include <uapi/linux/udp.h>
+#include <asm/byteorder.h>
 #include <uapi/linux/bpf.h>
 #include "bpf_helpers.h"
-#include <uapi/linux/filter.h>
-#include <uapi/linux/pkt_cls.h>
 
 #define IP_TCP 	6
 #define ETH_HLEN 14
+#ifndef DROP_SEQUENCE
+#define SEQUENCE {}
+#endif
 
+#ifndef SEQUENCE
+#define SEQUENCE {0, 3, 8, 10, 4}
+#endif
+
+
+
+// from uapi/linux/ip.h
+struct iphdr {
+#if defined(__LITTLE_ENDIAN_BITFIELD)
+	__u8	ihl:4,
+		version:4;
+#elif defined (__BIG_ENDIAN_BITFIELD)
+	__u8	version:4,
+  		ihl:4;
+#else
+#error	"Please fix <asm/byteorder.h>"
+#endif
+	__u8	tos;
+	__be16	tot_len;
+	__be16	id;
+	__be16	frag_off;
+	__u8	ttl;
+	__u8	protocol;
+	__sum16	check;
+	__be32	saddr;
+	__be32	daddr;
+	/*The options start here. */
+};
+
+
+
+
+// from uapi/linux/udp.h
+struct udphdr {
+	__be16	source;
+	__be16	dest;
+	__be16	len;
+	__sum16	check;
+};
+
+
+
+// from uapi/linux/tcp.h
 struct tcphdr {
 	__be16	source;
 	__be16	dest;
@@ -66,12 +107,6 @@ struct bpf_elf_map {
     __u32 pinning;
 };
 //
-///* copy of 'struct ethhdr' without __packed */
-struct eth_hdr {
-    unsigned char   h_dest[ETH_ALEN];
-    unsigned char   h_source[ETH_ALEN];
-    unsigned short  h_proto;
-};
 
 
 struct bpf_elf_map SEC("maps") map = {
@@ -104,6 +139,22 @@ typedef enum state {
 #define bpf_debug(fmt, ...) { } while (0)
 #endif
 
+
+// from uapi/linux/pkt_cls.h
+#define TC_ACT_UNSPEC	(-1)
+#define TC_ACT_OK		0
+#define TC_ACT_RECLASSIFY	1
+#define TC_ACT_SHOT		2
+#define TC_ACT_PIPE		3
+#define TC_ACT_STOLEN		4
+#define TC_ACT_QUEUED		5
+#define TC_ACT_REPEAT		6
+#define TC_ACT_REDIRECT		7
+#define TC_ACT_TRAP		8
+
+
+
+
 #define PASS TC_ACT_OK
 #define DROP TC_ACT_SHOT
 
@@ -114,9 +165,25 @@ typedef enum state {
 #define UDP 0x11
 #define TCP 0x06
 
+#ifndef PROTOCOL_TO_WATCH
+#define PROTOCOL_TO_WATCH TCP
+#endif
+
 #define PROBA_PRECISION 5 // number of digits in the decimal part
 
-//#define PROBA_percents 5 // loss_percentage
+#ifndef PROBA_percents
+#define PROBA_percents 5 // loss_percentage
+#endif
+
+#ifndef GEMODEL
+#define GEMODEL 0 // use GEMODEL
+#define GEMODEL_P_PERCENTS ((uint32_t) 0)
+#define GEMODEL_R_PERCENTS ((uint32_t) 100)
+#define GEMODEL_K_PERCENTS ((uint32_t) 100)
+#define GEMODEL_H_PERCENTS ((uint32_t) 0)
+
+#endif
+
 #define PROBA_percents_times_100 ((uint32_t) (PROBA_percents*100))
 #define GEMODEL_P_PERCENTS_TIMES_100 ((uint32_t) (GEMODEL_P_PERCENTS*100))
 #define GEMODEL_R_PERCENTS_TIMES_100 ((uint32_t) (GEMODEL_R_PERCENTS*100))
@@ -397,6 +464,20 @@ __attribute__((always_inline)) int drop_if_tcp_port(struct __sk_buff *skb, __u16
     return (port == sport || port == dport) ? DROP : PASS;
 }
 
+__attribute__((always_inline)) int drop_if_port(struct __sk_buff *skb, __u16 port, __u16 protocol) {
+    __u16 sport;
+    __u16 dport;
+    if (protocol == TCP) {
+        sport = get_tcp_sport(skb);
+        dport = get_tcp_dport(skb);
+    } else if (protocol == UDP) {
+        sport = get_udp_sport(skb);
+        dport = get_udp_dport(skb);
+    }
+
+    return (port == sport || port == dport) ? DROP : PASS;
+}
+
 __attribute__((always_inline)) int drop_if_protocol(struct __sk_buff *skb, __u8 proto) {
     return (load_byte(skb, ETH_HLEN + offsetof(struct iphdr, protocol)) == proto) ? DROP : PASS;
 }
@@ -404,9 +485,9 @@ __attribute__((always_inline)) int drop_if_protocol(struct __sk_buff *skb, __u8 
 // user defined decision function
 // returns DROP when a packet must be dropped
 // returns PASS otherwise
-__attribute__((always_inline)) int decision_function(struct __sk_buff *skb) {
+__attribute__((always_inline)) int decision_function(struct __sk_buff *skb, __u16 protocol) {
     // to be completed by the user
-    if (ALL_DROP(drop_if_udp_port(skb, PORT_TO_WATCH), drop_if_protocol(skb, UDP), drop_if_addrs(skb, IP1_TO_DROP, IP2_TO_DROP))){
+    if (ALL_DROP(drop_if_protocol(skb, protocol), drop_if_port(skb, PORT_TO_WATCH, protocol), drop_if_addrs(skb, IP1_TO_DROP, IP2_TO_DROP))){
         if (GEMODEL)
             return drop_if_gemodel(GEMODEL_P_PERCENTS_TIMES_100, GEMODEL_R_PERCENTS_TIMES_100, GEMODEL_K_PERCENTS_TIMES_100, GEMODEL_H_PERCENTS_TIMES_100);
         else
@@ -418,11 +499,11 @@ __attribute__((always_inline)) int decision_function(struct __sk_buff *skb) {
 // use to drop a defined TCP packet sequence
 
 // this functions drops the packets 0, 3, 4, 8 and 10 from the TCP flow between IP1_TO_DROP and IP2_TO_DROP, on port PORT_TO_WATCH
-__attribute__((always_inline)) int decision_function_drop_tcp_sequence(struct __sk_buff *skb) {
+__attribute__((always_inline)) int decision_function_drop_sequence(struct __sk_buff *skb, __u16 protocol) {
     // to be completed by the user
-    if (ALL_DROP(drop_if_tcp_port(skb, PORT_TO_WATCH), drop_if_protocol(skb, TCP), drop_if_addrs(skb, IP1_TO_DROP, IP2_TO_DROP))){
-        __u32 sequence[5] = {0, 3, 8, 10, 4};
-        return drop_packet_sequence(sequence, 5);
+    if (ALL_DROP(drop_if_protocol(skb, protocol), drop_if_port(skb, PORT_TO_WATCH, protocol), drop_if_addrs(skb, IP1_TO_DROP, IP2_TO_DROP))){
+        __u32 sequence[] = SEQUENCE;
+        return drop_packet_sequence(sequence, sizeof(sequence)/sizeof(__u32));
     }
     return PASS;
 }
@@ -433,8 +514,11 @@ __attribute__((always_inline)) int decision_function_drop_tcp_sequence(struct __
 SEC("action") int handle_ingress(struct __sk_buff *skb)
 {
     // to be completed by the user
-    return decision_function(skb);
-    //return decision_function_drop_tcp_sequence(skb);
+    #if DROP_SEQUENCE
+    return decision_function_drop_sequence(skb, PROTOCOL_TO_WATCH);
+    #else
+    return decision_function(skb, PROTOCOL_TO_WATCH);
+    #endif
 }
 
 char _license[] SEC("license") = "GPL";
