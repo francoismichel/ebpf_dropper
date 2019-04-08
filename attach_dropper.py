@@ -33,6 +33,8 @@ parser.add_argument("--attach", help="specifies the interface on which to attach
                     default=None)
 parser.add_argument("--attach-ingress", help="if set and the --attach option is used, the dropper will be attached in"
                                              "ingress instead of egress", action="store_true")
+parser.add_argument("--clean", help="clean everything instead of compiling and attaching", action="store_true")
+
 
 args = parser.parse_args()
 
@@ -56,25 +58,30 @@ clang_args = "-DGEMODEL={} -DGEMODEL_P_PERCENTS={} -DGEMODEL_R_PERCENTS={} -DGEM
     .format(use_gemodel, args.P, args.R, args.K, args.H, args.P, drop_sequence, sequence, args.seed, ip_to_int(ips[0]), ip_to_int(ips[1]),
             args.port, protocol, args.headers)
 
-
 import os
 
-compile_cmd = "clang -O2 {} -D__KERNEL__ -D__ASM_SYSREG_H -Wno-unused-value -Wno-pointer-sign " \
-              "-Wno-compare-distinct-pointer-types -I./headers -emit-llvm -c ebpf_dropper.c -o - | llc -march=bpf " \
-              "-filetype=obj -o {}".format(clang_args, args.f)
-if args.v:
-    print(compile_cmd)
-os.system(compile_cmd)
+if args.clean:
+    if os.path.exists(args.f):
+        os.remove(args.f)
+        add_dev_cmd = "tc qdisc del dev {} clsact".format(args.attach)
+
+else:
+    compile_cmd = "clang -O2 {} -D__KERNEL__ -D__ASM_SYSREG_H -Wno-unused-value -Wno-pointer-sign " \
+                  "-Wno-compare-distinct-pointer-types -I./headers -emit-llvm -c ebpf_dropper.c -o - | llc -march=bpf " \
+                  "-filetype=obj -o {}".format(clang_args, args.f)
+    if args.v:
+        print(compile_cmd)
+    os.system(compile_cmd)
 
 
-if args.attach:
-    add_dev_cmd = "tc qdisc replace dev {} clsact".format(args.attach)
-    if args.v:
-        print(add_dev_cmd)
-    os.system(add_dev_cmd)
-    direction = "ingress" if args.attach_ingress else 'egress'
-    attach_cmd = "tc filter replace dev {} {} bpf obj {} section action direct-action"\
-        .format(args.attach, direction, args.f)
-    if args.v:
-        print(attach_cmd)
-    os.system(attach_cmd)
+    if args.attach:
+        add_dev_cmd = "tc qdisc replace dev {} clsact".format(args.attach)
+        if args.v:
+            print(add_dev_cmd)
+        os.system(add_dev_cmd)
+        direction = "ingress" if args.attach_ingress else 'egress'
+        attach_cmd = "tc filter replace dev {} {} bpf obj {} section action direct-action"\
+            .format(args.attach, direction, args.f)
+        if args.v:
+            print(attach_cmd)
+        os.system(attach_cmd)
