@@ -64,7 +64,8 @@ if args.clean:
     if os.path.exists(args.f):
         os.remove(args.f)
     del_dev_cmd = "tc qdisc del dev {} clsact".format(args.attach)
-    print(del_dev_cmd)
+    if args.v:
+        print(del_dev_cmd)
     os.system(del_dev_cmd)
 
 else:
